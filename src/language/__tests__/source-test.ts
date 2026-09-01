@@ -30,4 +30,18 @@ describe('Source', () => {
       'column in locationOffset is 1-indexed and must be positive.',
     );
   });
+
+  it('is structured-cloneable without exposing its brand', () => {
+    const source = new Source('query Q { field }', 'a.graphql', {
+      line: 2,
+      column: 3,
+    });
+
+    expect(source.__kind).to.be.a('symbol');
+    expect(structuredClone(source)).to.deep.equal({
+      body: 'query Q { field }',
+      name: 'a.graphql',
+      locationOffset: { line: 2, column: 3 },
+    });
+  });
 });

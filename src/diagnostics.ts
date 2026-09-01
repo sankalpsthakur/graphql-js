@@ -17,6 +17,13 @@
  * `graphql:resolve` and as formatted errors in an enclosing execution or
  * subscription result. `graphql:parse`, `graphql:validate`, and
  * `graphql:execute:variableCoercion` are sync-only channels.
+ *
+ * Tracing contexts keep GraphQL.js objects such as `schema`, `document`,
+ * and `result` on non-enumerable properties so in-process subscribers can
+ * still read them by name. Enumerable own properties are limited to
+ * structured-clone-safe values that diagnostics forwarders (for example
+ * Cloudflare Tail Workers) actually need, such as operation names and
+ * field paths.
  * @category Diagnostics
  */
 
@@ -314,6 +321,75 @@ function resolveDiagnosticsChannel(): DiagnosticsChannelModule | undefined {
 const dc = resolveDiagnosticsChannel();
 
 /**
+ * Heavy GraphQL.js values that in-process subscribers still read by name,
+ * but that `structuredClone` cannot copy (class brands, resolver functions,
+ * AST `loc` tokens, user result objects, async generators).
+ */
+const HIDDEN_TRACING_KEYS = [
+  'schema',
+  'document',
+  'operation',
+  'args',
+  'rawVariableValues',
+] as const;
+
+function hideOwnProperty(object: object, key: string): void {
+  const desc = Object.getOwnPropertyDescriptor(object, key);
+  if (desc == null) {
+    return;
+  }
+  Object.defineProperty(object, key, { ...desc, enumerable: false });
+}
+
+function installHiddenResult(context: object): void {
+  let result: unknown;
+  Object.defineProperty(context, 'result', {
+    configurable: true,
+    enumerable: false,
+    get(): unknown {
+      return result;
+    },
+    set(value: unknown) {
+      result = value;
+    },
+  });
+}
+
+/**
+ * Make a tracing context structured-clone-safe without dropping in-process
+ * access to GraphQL.js objects. Native `traceSync` assigns `result` later,
+ * so that field is installed as a hidden accessor up front.
+ *
+ * @internal
+ */
+export function prepareTracingContext<T extends object>(context: T): T {
+  for (const key of HIDDEN_TRACING_KEYS) {
+    hideOwnProperty(context, key);
+  }
+  installHiddenResult(context);
+  return context;
+}
+
+function wrapTracingChannel<TContext>(
+  channel: MinimalTracingChannel<TContext>,
+): MinimalTracingChannel<TContext> {
+  const originalTraceSync = channel.traceSync.bind(channel);
+  channel.traceSync = (fn, context, thisArg, ...args) =>
+    originalTraceSync(fn, prepareTracingContext(context), thisArg, ...args);
+  return channel;
+}
+
+function tracingChannelOf<TContext>(
+  name: string,
+): MinimalTracingChannel<TContext> | undefined {
+  /* node:coverage ignore next 3 */
+  if (dc == null) {
+    return undefined;
+  }
+  return wrapTracingChannel(dc.tracingChannel<TContext>(name));
+}
+
+/**
  * Per-channel handles, resolved once at module load. `undefined` when
  * `node:diagnostics_channel` isn't available. Emission sites read these
  * directly to keep the no-subscriber fast path to a single property access
@@ -323,31 +399,31 @@ const dc = resolveDiagnosticsChannel();
  */
 export const parseChannel:
   | MinimalTracingChannel<GraphQLParseContext>
-  | undefined = dc?.tracingChannel('graphql:parse');
+  | undefined = tracingChannelOf('graphql:parse');
 /** @internal */
 export const validateChannel:
   | MinimalTracingChannel<GraphQLValidateContext>
-  | undefined = dc?.tracingChannel('graphql:validate');
+  | undefined = tracingChannelOf('graphql:validate');
 /** @internal */
 export const executeChannel:
   | MinimalTracingChannel<GraphQLExecuteContext>
-  | undefined = dc?.tracingChannel('graphql:execute');
+  | undefined = tracingChannelOf('graphql:execute');
 /** @internal */
 export const executeVariableCoercionChannel:
   | MinimalTracingChannel<GraphQLExecuteVariableCoercionContext>
-  | undefined = dc?.tracingChannel('graphql:execute:variableCoercion');
+  | undefined = tracingChannelOf('graphql:execute:variableCoercion');
 /** @internal */
 export const executeRootSelectionSetChannel:
   | MinimalTracingChannel<GraphQLExecuteRootSelectionSetContext>
-  | undefined = dc?.tracingChannel('graphql:execute:rootSelectionSet');
+  | undefined = tracingChannelOf('graphql:execute:rootSelectionSet');
 /** @internal */
 export const subscribeChannel:
   | MinimalTracingChannel<GraphQLSubscribeContext>
-  | undefined = dc?.tracingChannel('graphql:subscribe');
+  | undefined = tracingChannelOf('graphql:subscribe');
 /** @internal */
 export const resolveChannel:
   | MinimalTracingChannel<GraphQLResolveContext>
-  | undefined = dc?.tracingChannel('graphql:resolve');
+  | undefined = tracingChannelOf('graphql:resolve');
 
 const SUB_CHANNEL_KEYS: ReadonlyArray<
   'start' | 'end' | 'asyncStart' | 'asyncEnd' | 'error'
@@ -407,7 +483,7 @@ export function traceMixed<TResult, TContext extends TraceLifecycleContext>(
   contextInput: TraceStartContext<TContext>,
   fn: () => TResult,
 ): TResult {
-  const context = contextInput as TContext;
+  const context = prepareTracingContext(contextInput as TContext);
 
   return channel.start.runStores(context, () => {
     let result: TResult;

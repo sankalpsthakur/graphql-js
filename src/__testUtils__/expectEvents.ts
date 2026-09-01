@@ -28,6 +28,31 @@ type ExpectedEventsFactory<TResult, TContext = unknown> = (
 ) => ReadonlyArray<CollectedEventFor<TContext>>;
 
 /**
+ * Copy enumerable clone-safe fields plus hidden GraphQL.js objects so tests
+ * can still assert on `schema` / `document` / `result` after those properties
+ * are made non-enumerable for structured clone.
+ */
+export function snapshotTracingContext<TContext>(context: TContext): TContext {
+  if (typeof context !== 'object' || context === null) {
+    return context;
+  }
+  const snapshot: { [key: string]: unknown } = {
+    ...(context as { [key: string]: unknown }),
+  };
+  for (const key of Object.getOwnPropertyNames(context)) {
+    if (Object.hasOwn(snapshot, key)) {
+      continue;
+    }
+    const value = (context as { [key: string]: unknown })[key];
+    if (value === undefined && (key === 'result' || key === 'error')) {
+      continue;
+    }
+    snapshot[key] = value;
+  }
+  return snapshot as TContext;
+}
+
+/**
  * Collect GraphQL tracing events while `fn` runs, build the expected event
  * list from the callback result, and always unsubscribe before returning.
  */
@@ -41,10 +66,7 @@ export async function expectEvents<TContext = unknown, TResult = unknown>(
 
   for (const tracingSubChannel of tracingSubChannels) {
     handler[tracingSubChannel] = (context: TContext) => {
-      const snapshot =
-        typeof context === 'object' && context !== null
-          ? { ...context }
-          : context;
+      const snapshot = snapshotTracingContext(context);
       events.push({
         channel: tracingSubChannel,
         context: snapshot,
