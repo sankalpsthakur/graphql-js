@@ -1,0 +1,53 @@
+name: PR1 complete tracing correction validation
+on:
+  push:
+    branches: [validation/pr1-error-clone-20260918]
+    paths: [.github/workflows/pr1-error-clone-validated.yml]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: b3b2c471ca3feb486f954f3e06e80cefc32bee0c
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts
+      - name: Run corrected before-after and repository tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.request import urlopen
+          import textwrap
+          url = 'https://raw.githubusercontent.com/sankalpsthakur/graphql-js/f6ac7c83da8562d5def734c6980ea75a9165f770/.github/workflows/pr1-error-clone-validation.yml'
+          workflow = urlopen(url, timeout=30).read().decode()
+          script = textwrap.dedent(workflow.split("          python3 - <<'PY'\n",1)[1].split('\n          PY',1)[0])
+          old = "const realChannel = dc.tracingChannel('graphql:parse');"
+          assert script.count(old) == 1
+          script = script.replace(old, "const realChannel = dc.tracingChannel<GraphQLParseContext>('graphql:parse');")
+          old = "const handler = (context: { error?: unknown }) => {\n          errors.push(context.error);"
+          new = "const handler = (context: unknown) => {\n          errors.push((context as { error?: unknown }).error);"
+          assert script.count(old) == 1
+          script = script.replace(old, new)
+          old = "assert run('format', ['npx','--no-install','prettier','--write',str(source),str(test)]).returncode == 0"
+          new = "run('test_style_fix', ['npx','--no-install','eslint','--fix',str(test)])\n    " + old
+          assert script.count(old) == 1
+          script = script.replace(old, new)
+          Path('evidence/validation.py').write_text(script)
+          compile(script, '<validation>', 'exec')
+          exec(compile(script, '<validation>', 'exec'))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: graphql-pr1-error-correction
+          path: evidence/
+          retention-days: 14
