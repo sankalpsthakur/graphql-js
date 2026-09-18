@@ -1,0 +1,67 @@
+name: Stage reviewed PR1 correction
+on:
+  push:
+    branches: [validation/pr1-error-clone-20260918]
+    paths: [.github/workflows/pr1-stage-reviewed-correction.yml]
+permissions: {}
+jobs:
+  stage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: graphql-pr1-error-correction
+          run-id: 35314451246
+          github-token: ${{ github.token }}
+          path: evidence
+      - name: Verify reviewed file hashes and create Git objects only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          from urllib.request import Request,urlopen
+          repo='sankalpsthakur/graphql-js'
+          base='b3b2c471ca3feb486f954f3e06e80cefc32bee0c'
+          prefix='https://api.github.com/repos/'+repo+'/'
+          def api(path,data=None):
+              req=Request(prefix+path, data=None if data is None else json.dumps(data).encode(), headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'})
+              with urlopen(req,timeout=30) as response:return json.load(response)
+          run=api('actions/runs/35314451246')
+          assert run['head_sha']=='4bcefb81eb0a2fab253ca3ae97f7fd6e3ff03b78' and run['conclusion']=='success'
+          report=json.loads(Path('evidence/results.json').read_text())
+          assert report['base']==base
+          for key in ['after','types','lint_changed','repository_tests','coverage','whitespace']:
+              assert report[key]['exit']==0,(key,report[key])
+          assert report['before']['exit']!=0
+          expected={
+              'src/diagnostics.ts':('diagnostics.ts','1d9a372e0c5b6fc64d5a52471972ef7867ae761f8151c982747e40f7c1053c8e'),
+              'src/__tests__/diagnostics-error-clone-test.ts':('diagnostics-error-clone-test.ts','b45403f58bf181d931f38c9ac0755d96e746a2cfdfd16cbe9f663eeefd18a239'),
+          }
+          assert sorted(report['changed_paths'])==sorted(expected)
+          assert api('git/ref/heads/cursor/diagnostics-clone-safe-payloads-a059')['object']['sha']==base, 'Feature branch moved; no change made'
+          elements=[]
+          for path,(name,digest) in expected.items():
+              content=Path('evidence',name).read_bytes()
+              assert hashlib.sha256(content).hexdigest()==digest,path
+              blob=api('git/blobs',{'content':content.decode(),'encoding':'utf-8'})
+              assert blob['sha']==hashlib.sha1(('blob '+str(len(content))+'\0').encode()+content).hexdigest()
+              elements.append({'path':path,'mode':'100644','type':'blob','sha':blob['sha']})
+          tree=api('git/trees',{'base_tree':api('git/commits/'+base)['tree']['sha'],'tree':elements})
+          commit=api('git/commits',{'message':'Keep raw tracing errors out of structured clones\n\nPreserve in-process error identity for synchronous throws and promise rejections. Add native tracing and public resolver regressions.\n\nValidated in Actions run 35314451246: 41 focused cases and 3079 repository tests; TypeScript, changed-file lint and coverage gates pass.\n\nAI-assisted implementation and validation.','tree':tree['sha'],'parents':[base],'author':{'name':'Sankalp Thakur','email':'31366524+sankalpsthakur@users.noreply.github.com'}})
+          receipt={'repository':repo,'parent':base,'commit_sha':commit['sha'],'tree_sha':tree['sha'],'files':elements,'validation_run':35314451246,'branch_updated':False}
+          Path('evidence/staged-commit.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          print(json.dumps(receipt,indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: graphql-reviewed-correction-commit
+          path: evidence/
+          retention-days: 14
