@@ -19,11 +19,10 @@
  * `graphql:execute:variableCoercion` are sync-only channels.
  *
  * Tracing contexts keep GraphQL.js objects such as `schema`, `document`,
- * and `result` on non-enumerable properties so in-process subscribers can
- * still read them by name. Enumerable own properties are limited to
- * structured-clone-safe values that diagnostics forwarders (for example
- * Cloudflare Tail Workers) actually need, such as operation names and
- * field paths.
+ * `result`, and raw `error` values on non-enumerable properties. In-process
+ * subscribers retain direct access and error identity; structured-clone
+ * forwarders omit those fields. Application-added properties are not
+ * sanitized and may still prevent cloning.
  * @category Diagnostics
  */
 
@@ -356,9 +355,9 @@ function installHiddenResult(context: object): void {
 }
 
 /**
- * Make a tracing context structured-clone-safe without dropping in-process
- * access to GraphQL.js objects. Native `traceSync` assigns `result` later,
- * so that field is installed as a hidden accessor up front.
+ * Hide known non-cloneable fields without dropping in-process access.
+ * Native `traceSync` and `traceMixed` assign results and errors later,
+ * so their properties are made non-enumerable before tracing starts.
  *
  * @internal
  */
@@ -367,6 +366,13 @@ export function prepareTracingContext<T extends object>(context: T): T {
     hideOwnProperty(context, key);
   }
   installHiddenResult(context);
+  // Keep arbitrary thrown values local, including later assignments.
+  Object.defineProperty(context, 'error', {
+    configurable: true,
+    enumerable: false,
+    value: (context as TraceLifecycleContext).error,
+    writable: true,
+  });
   return context;
 }
 
