@@ -37,12 +37,20 @@ jobs:
           new = "const handler = (context: unknown) => {\n          errors.push((context as { error?: unknown }).error);"
           assert script.count(old) == 1
           script = script.replace(old, new)
+          # These cases deliberately reject with arbitrary JavaScript values.
+          old = "await traceMixed(parseChannel, context, () => Promise.reject(thrown));"
+          new = "await traceMixed(parseChannel, context, () => {\n                // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- exercise arbitrary rejection values\n                return Promise.reject(thrown);\n              });"
+          assert script.count(old) == 1
+          script = script.replace(old, new)
+          old = "if (asynchronous) {\n                return Promise.reject(thrown);"
+          new = "if (asynchronous) {\n                // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- exercise arbitrary rejection values\n                return Promise.reject(thrown);"
+          assert script.count(old) == 1
+          script = script.replace(old, new)
           old = "assert run('format', ['npx','--no-install','prettier','--write',str(source),str(test)]).returncode == 0"
           new = "run('test_style_fix', ['npx','--no-install','eslint','--fix',str(test)])\n    " + old
           assert script.count(old) == 1
           script = script.replace(old, new)
           Path('evidence/validation.py').write_text(script)
-          compile(script, '<validation>', 'exec')
           exec(compile(script, '<validation>', 'exec'))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
