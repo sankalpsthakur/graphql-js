@@ -1,0 +1,243 @@
+name: PR1 tracing error correction validation
+on:
+  push:
+    branches: [validation/pr1-error-clone-20260918]
+    paths: [.github/workflows/pr1-error-clone-validation.yml]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: b3b2c471ca3feb486f954f3e06e80cefc32bee0c
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install locked development dependencies
+        run: npm ci --ignore-scripts
+      - name: Reproduce errors, patch and run repository tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, subprocess, re
+          evidence = Path('evidence')
+          report = {'base': subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip(), 'node': subprocess.check_output(['node','--version'], text=True).strip(), 'published': False}
+          expected = 'b3b2c471ca3feb486f954f3e06e80cefc32bee0c'
+          assert report['base'] == expected
+          source = Path('src/diagnostics.ts')
+          original = source.read_text()
+          test = Path('src/__tests__/diagnostics-error-clone-test.ts')
+          assert not test.exists()
+          test.write_text('''/* eslint-disable n/no-unsupported-features/node-builtins */
+          import dc from 'node:diagnostics_channel';
+          import { describe, it } from 'node:test';
+
+          import { expect } from 'chai';
+
+          import { invariant } from '../jsutils/invariant.ts';
+
+          import { parse } from '../language/parser.ts';
+
+          import { execute } from '../execution/execute.ts';
+
+          import { buildSchema } from '../utilities/buildASTSchema.ts';
+
+          import type { GraphQLParseContext } from '../diagnostics.ts';
+          import { parseChannel, prepareTracingContext, traceMixed } from '../diagnostics.ts';
+
+          describe('tracing raw error clone isolation', () => {
+            const cases: ReadonlyArray<readonly [string, unknown]> = [
+              ['Error', new Error('failure')],
+              ['function', () => undefined],
+              ['symbol', Symbol('failure')],
+              ['object', { callback: () => undefined }],
+              ['Error with non-cloneable cause', new Error('failure', { cause: () => undefined })],
+              ['string', 'failure'],
+              ['null', null],
+              ['undefined', undefined],
+            ];
+
+            for (const [label, thrown] of cases) {
+              for (const mode of ['native', 'mixed throw', 'mixed rejection']) {
+                it(`${mode} preserves ${label} locally without cloning it`, async () => {
+                  invariant(parseChannel !== undefined);
+                  const realChannel = dc.tracingChannel('graphql:parse');
+                  const clones: unknown[] = [];
+                  const cloneFailures: unknown[] = [];
+                  const errors: unknown[] = [];
+                  const events: string[] = [];
+                  function capture(event: string, context: GraphQLParseContext): void {
+                    events.push(event);
+                    if (event === 'error') {
+                      errors.push(context.error);
+                    }
+                    try {
+                      clones.push(structuredClone(context));
+                    } catch (error) {
+                      cloneFailures.push(error);
+                    }
+                  }
+                  const handlers = {
+                    start: (context: GraphQLParseContext) => capture('start', context),
+                    end: (context: GraphQLParseContext) => capture('end', context),
+                    asyncStart: (context: GraphQLParseContext) => capture('asyncStart', context),
+                    asyncEnd: (context: GraphQLParseContext) => capture('asyncEnd', context),
+                    error: (context: GraphQLParseContext) => capture('error', context),
+                  };
+                  realChannel.subscribe(handlers);
+                  let caught = false;
+                  try {
+                    const context = { source: '{ value }' };
+                    const fail = () => { throw thrown; };
+                    try {
+                      if (mode === 'native') {
+                        parseChannel.traceSync(fail, context);
+                      } else if (mode === 'mixed throw') {
+                        traceMixed(parseChannel, context, fail);
+                      } else {
+                        await traceMixed(parseChannel, context, () => Promise.reject(thrown));
+                      }
+                    } catch (error) {
+                      caught = true;
+                      expect(error).to.equal(thrown);
+                    }
+                  } finally {
+                    realChannel.unsubscribe(handlers);
+                  }
+                  expect(caught).to.equal(true);
+                  expect(errors).to.have.lengthOf(1);
+                  expect(errors[0]).to.equal(thrown);
+                  expect(events).to.deep.equal(mode === 'mixed rejection'
+                    ? ['start', 'end', 'error', 'asyncStart', 'asyncEnd']
+                    : ['start', 'error', 'end']);
+                  expect(cloneFailures).to.deep.equal([]);
+                  expect(clones).to.have.lengthOf(events.length);
+                  for (const clone of clones) {
+                    expect(clone).to.deep.equal({ source: '{ value }' });
+                  }
+                });
+              }
+
+              for (const asynchronous of [false, true]) {
+                it(`public resolver ${asynchronous ? 'rejection' : 'throw'} retains ${label}`, async () => {
+                  const errors: unknown[] = [];
+                  const clones: unknown[] = [];
+                  const cloneFailures: unknown[] = [];
+                  const channel = dc.tracingChannel('graphql:resolve');
+                  const handler = (context: { error?: unknown }) => {
+                    errors.push(context.error);
+                    try {
+                      clones.push(structuredClone(context));
+                    } catch (error) {
+                      cloneFailures.push(error);
+                    }
+                  };
+                  channel.error.subscribe(handler);
+                  try {
+                    const result = await execute({
+                      schema: buildSchema('type Query { value: String }'),
+                      document: parse('{ value }'),
+                      rootValue: { value() {
+                        if (asynchronous) {
+                          return Promise.reject(thrown);
+                        }
+                        throw thrown;
+                      } },
+                    });
+                    expect(result.errors).to.have.lengthOf(1);
+                  } finally {
+                    channel.error.unsubscribe(handler);
+                  }
+                  expect(errors).to.have.lengthOf(1);
+                  expect(errors[0]).to.equal(thrown);
+                  expect(cloneFailures).to.deep.equal([]);
+                  expect(clones).to.have.lengthOf(1);
+                  expect(clones[0]).to.not.have.property('error');
+                });
+              }
+            }
+
+            it('preserves an existing raw error while hiding the property', () => {
+              const error = Symbol('existing');
+              const context = prepareTracingContext({ error, source: 'query' });
+              expect(context.error).to.equal(error);
+              expect(structuredClone(context)).to.deep.equal({ source: 'query' });
+              context.error = Symbol('replacement');
+              expect(structuredClone(context)).to.deep.equal({ source: 'query' });
+            });
+          });
+          ''')
+          def run(name, args, timeout=600):
+              proc = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+              (evidence / (name + '.log')).write_text(proc.stdout)
+              report[name] = {'command': args, 'exit': proc.returncode}
+              (evidence / 'results.json').write_text(json.dumps(report, indent=2)+'\n')
+              print(name, proc.returncode, proc.stdout[-1800:], flush=True)
+              return proc
+          focused = ['node','--experimental-strip-types','--throw-deprecation','--test','--experimental-test-isolation=none','--test-concurrency=1','--test-reporter=tap',str(test)]
+          try:
+              before = run('before', focused)
+              assert before.returncode != 0 and 'DataCloneError' in before.stdout, 'No expected regression reproduced'
+              assert re.search(r'# tests 41\b', before.stdout), 'Expected test inventory not executed'
+              needle = '  installHiddenResult(context);\n  return context;'
+              replacement = '''  installHiddenResult(context);
+            // Keep arbitrary thrown values local, including later assignments.
+            Object.defineProperty(context, 'error', {
+              configurable: true,
+              enumerable: false,
+              value: (context as TraceLifecycleContext).error,
+              writable: true,
+            });
+            return context;'''
+              assert original.count(needle) == 1
+              patched = original.replace(needle, replacement)
+              old_doc = ''' * and `result` on non-enumerable properties so in-process subscribers can
+           * still read them by name. Enumerable own properties are limited to
+           * structured-clone-safe values that diagnostics forwarders (for example
+           * Cloudflare Tail Workers) actually need, such as operation names and
+           * field paths.'''
+              new_doc = ''' * `result`, and raw `error` values on non-enumerable properties. In-process
+           * subscribers retain direct access and error identity; structured-clone
+           * forwarders omit those fields. Application-added properties are not
+           * sanitized and may still prevent cloning.'''
+              assert patched.count(old_doc) == 1
+              patched = patched.replace(old_doc, new_doc)
+              old_doc = ''' * Make a tracing context structured-clone-safe without dropping in-process
+           * access to GraphQL.js objects. Native `traceSync` assigns `result` later,
+           * so that field is installed as a hidden accessor up front.'''
+              new_doc = ''' * Hide known non-cloneable fields without dropping in-process access.
+           * Native `traceSync` and `traceMixed` assign results and errors later,
+           * so their properties are made non-enumerable before tracing starts.'''
+              assert patched.count(old_doc) == 1
+              source.write_text(patched.replace(old_doc, new_doc))
+              assert run('format', ['npx','--no-install','prettier','--write',str(source),str(test)]).returncode == 0
+              assert run('after', focused).returncode == 0
+              assert run('types', ['npm','run','check:ts']).returncode == 0
+              assert run('lint_changed', ['npx','--no-install','eslint','--max-warnings','0',str(source),str(test)]).returncode == 0
+              assert run('repository_tests', ['npm','run','testonly'], 900).returncode == 0
+              report['coverage_exit'] = run('coverage', ['npm','run','testonly:cover'],900).returncode
+              subprocess.run(['git','add','-N',str(test)],check=True)
+              assert run('whitespace',['git','diff','--check']).returncode == 0
+              report['changed_paths'] = subprocess.check_output(['git','diff','--name-only'],text=True).splitlines()
+              assert report['changed_paths'] == ['src/__tests__/diagnostics-error-clone-test.ts','src/diagnostics.ts']
+              report['status'] = 'validated locally on Actions; not pushed to feature branch'
+          finally:
+              subprocess.run(['git','add','-N',str(test)],check=False)
+              (evidence/'correction.patch').write_bytes(subprocess.check_output(['git','diff','--binary','--','src/diagnostics.ts',str(test)]))
+              (evidence/'diagnostics.ts').write_text(source.read_text())
+              (evidence/'diagnostics-error-clone-test.ts').write_text(test.read_text())
+              (evidence/'results.json').write_text(json.dumps(report,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: graphql-pr1-error-correction
+          path: evidence/
+          retention-days: 14
