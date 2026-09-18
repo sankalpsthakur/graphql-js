@@ -334,6 +334,10 @@ subscription's lifetime or only about per-event execution.
 
 - Tracing relies on `node:diagnostics_channel`. Node, Deno, and Bun expose it;
   browsers do not, where tracing is a no-op.
+- Tracing payloads keep GraphQL.js objects such as `schema`, `document`, and
+  `result` non-enumerable so in-process subscribers can still read them, while
+  `structuredClone` (used by Cloudflare Tail Workers) only copies clone-safe
+  enumerable fields such as operation names and field paths.
 - `graphql:parse`, `graphql:validate`, and
   `graphql:execute:variableCoercion` are sync-only channels. They only emit
   `start`/`end`, plus `error` if the traced call throws.

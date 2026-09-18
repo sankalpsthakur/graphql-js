@@ -57,6 +57,9 @@ export class Source {
     locationOffset: Location = { line: 1, column: 1 },
   ) {
     this.__kind = sourceSymbol;
+    // Keep the brand non-enumerable so Source is structured-cloneable for
+    // diagnostics_channel consumers such as Cloudflare Tail Workers.
+    Object.defineProperty(this, '__kind', { enumerable: false });
     this.body = body;
     this.name = name;
     this.locationOffset = locationOffset;

@@ -4,7 +4,10 @@ import { expect } from 'chai';
 
 import type { TracingSubChannelRecord } from '../../__testUtils__/diagnosticsTracing.ts';
 import { tracingSubChannels } from '../../__testUtils__/diagnosticsTracing.ts';
-import { expectEvents } from '../../__testUtils__/expectEvents.ts';
+import {
+  expectEvents,
+  snapshotTracingContext,
+} from '../../__testUtils__/expectEvents.ts';
 import { expectNoTracingActivity } from '../../__testUtils__/expectNoTracingActivity.ts';
 import { getTracingChannel } from '../../__testUtils__/getTracingChannel.ts';
 
@@ -788,7 +791,7 @@ describe('resolve diagnostics channel', () => {
       handler[tracingSubChannel] = (context) => {
         events.push({
           channel: tracingSubChannel,
-          context: { ...context },
+          context: snapshotTracingContext(context),
         });
       };
     }

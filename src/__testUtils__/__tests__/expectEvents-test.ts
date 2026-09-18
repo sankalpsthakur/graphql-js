@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 
 import { expect } from 'chai';
 
-import { expectEvents } from '../expectEvents.ts';
+import { expectEvents, snapshotTracingContext } from '../expectEvents.ts';
 import { expectPromise } from '../expectPromise.ts';
 
 type TestTracingChannel = Parameters<typeof expectEvents>[0];
@@ -73,6 +73,38 @@ function createFakeTracingChannel(): TestTracingChannel {
 }
 
 describe('expectEvents', () => {
+  it('includes non-enumerable tracing fields and skips unset result', async () => {
+    const channel = createFakeTracingChannel();
+    const context = Object.defineProperties(
+      { value: 1 },
+      {
+        schema: { value: 'hidden-schema', enumerable: false },
+        result: { value: undefined, enumerable: false },
+        error: { value: undefined, enumerable: false },
+      },
+    );
+
+    await expectEvents(
+      channel,
+      () => {
+        channel.start.publish(context);
+        return 'done';
+      },
+      () => [
+        {
+          channel: 'start',
+          context: { value: 1, schema: 'hidden-schema' },
+        },
+      ],
+    );
+  });
+
+  it('snapshotTracingContext returns non-objects unchanged', () => {
+    expect(snapshotTracingContext(null)).to.equal(null);
+    expect(snapshotTracingContext(undefined)).to.equal(undefined);
+    expect(snapshotTracingContext('error')).to.equal('error');
+  });
+
   it('collects events and snapshots each published context', async () => {
     const channel = createFakeTracingChannel();
     const context = { value: 1 };

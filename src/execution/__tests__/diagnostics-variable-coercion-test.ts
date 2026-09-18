@@ -7,6 +7,7 @@ import type {
   TracingSubscriptionHandler,
 } from '../../__testUtils__/diagnosticsTracing.ts';
 import { tracingSubChannels } from '../../__testUtils__/diagnosticsTracing.ts';
+import { snapshotTracingContext } from '../../__testUtils__/expectEvents.ts';
 import { expectNoTracingActivity } from '../../__testUtils__/expectNoTracingActivity.ts';
 import { getTracingChannel } from '../../__testUtils__/getTracingChannel.ts';
 
@@ -44,7 +45,7 @@ function collectInto(
     {} as TracingSubscriptionHandler<GraphQLExecuteVariableCoercionContext>;
   for (const sub of tracingSubChannels) {
     handler[sub] = (context) => {
-      events.push({ channel: sub, context: { ...context } });
+      events.push({ channel: sub, context: snapshotTracingContext(context) });
     };
   }
   return handler;
